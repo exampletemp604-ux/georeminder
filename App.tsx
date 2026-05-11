@@ -1,4 +1,5 @@
-import { db } from "./utils/firebase";
+import { db, auth } from "./utils/firebase";
+import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
   collection,
   addDoc,
@@ -72,18 +73,35 @@ const App: React.FC = () => {
 
   /* ================= AUTH PERSISTENCE ================= */
   useEffect(() => {
-    const token = localStorage.getItem("authToken");
-    const email = localStorage.getItem("userEmail");
-
-    if (token && email) {
-      setUserEmail(email);
-      setCurrentScreen("dashboard");
-      if ("Notification" in window && Notification.permission === "default") {
-        Notification.requestPermission();
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUserEmail(user.email || "Authenticated User");
+        setCurrentScreen("dashboard");
+        if ("Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission();
+        }
+      } else {
+        setUserEmail(null);
+        if (currentScreen === "dashboard") {
+          setCurrentScreen("landing");
+        }
       }
-    }
-    setIsInitializing(false);
+      setIsInitializing(false);
+    });
+
+    return () => unsub();
   }, [currentScreen]);
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setUserEmail(null);
+      setReminders([]);
+      setCurrentScreen("landing");
+    } catch (err) {
+      console.error("Sign out error:", err);
+    }
+  };
 
   /* ================= LOAD REMINDERS ================= */
 
@@ -431,14 +449,6 @@ const App: React.FC = () => {
       console.error("Complete failed:", err);
       alert("Failed to complete reminder");
     }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem("authToken");
-    localStorage.removeItem("userEmail");
-    setUserEmail(null);
-    setReminders([]);
-    setCurrentScreen("landing");
   };
 
   const filteredReminders = reminders.filter((r) => r.status === filter);
