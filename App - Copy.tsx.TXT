@@ -9,7 +9,6 @@ import {
   updateDoc,
   query,
   where,
-  getDoc,
 } from "firebase/firestore";
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -23,7 +22,7 @@ import {
   Navigation,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Reminder, UserLocation, GeoStatus, UserProfile } from "./types";
+import { Reminder, UserLocation, GeoStatus } from "./types";
 import { calculateDistance, formatDistance } from "./utils/geoUtils";
 import { AddReminderModal } from "./components/AddReminderModal";
 import { TriggeredReminderModal } from "./components/TriggeredReminderModal";
@@ -39,8 +38,6 @@ const App: React.FC = () => {
 
   const [currentScreen, setCurrentScreen] = useState<"landing" | "login" | "dashboard">("landing");
   const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [userUid, setUserUid] = useState<string | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [dark, setDark] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
@@ -76,29 +73,15 @@ const App: React.FC = () => {
 
   /* ================= AUTH PERSISTENCE ================= */
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsub = onAuthStateChanged(auth, (user) => {
       if (user) {
-        setUserEmail(user.email || user.phoneNumber || "Authenticated User");
-        setUserUid(user.uid);
-        
-        // Fetch profile
-        try {
-          const userDoc = await getDoc(doc(db, "users", user.uid));
-          if (userDoc.exists()) {
-            setUserProfile(userDoc.data() as UserProfile);
-          }
-        } catch (err) {
-          console.error("Error fetching profile:", err);
-        }
-
+        setUserEmail(user.email || "Authenticated User");
         setCurrentScreen("dashboard");
         if ("Notification" in window && Notification.permission === "default") {
           Notification.requestPermission();
         }
       } else {
         setUserEmail(null);
-        setUserUid(null);
-        setUserProfile(null);
         if (currentScreen === "dashboard") {
           setCurrentScreen("landing");
         }
@@ -113,7 +96,6 @@ const App: React.FC = () => {
     try {
       await signOut(auth);
       setUserEmail(null);
-      setUserUid(null);
       setReminders([]);
       setCurrentScreen("landing");
     } catch (err) {
@@ -124,10 +106,10 @@ const App: React.FC = () => {
   /* ================= LOAD REMINDERS ================= */
 
   useEffect(() => {
-    if (currentScreen !== "dashboard" || !userUid) return;
+    if (currentScreen !== "dashboard" || !userEmail) return;
 
-    // Isolate data by the user's UID (more secure than email, works for phone accounts)
-    const q = query(collection(db, "reminders"), where("userId", "==", userUid));
+    // Isolate data by the mock user's email
+    const q = query(collection(db, "reminders"), where("userEmail", "==", userEmail));
 
     const unsub = onSnapshot(
       q,
@@ -422,12 +404,11 @@ const App: React.FC = () => {
   const handleAddReminder = async (
     data: Omit<Reminder, "id" | "createdAt" | "status">,
   ) => {
-    if (!userUid) return;
+    if (!userEmail) return;
     try {
       const docRef = await addDoc(collection(db, "reminders"), {
         ...data,
-        userId: userUid, // Identify which user this belongs to via secure UID
-        userEmail: userEmail || "", // Kept for backwards compatibility if needed
+        userEmail: userEmail, // Identify which user this belongs to
         createdAt: Date.now(),
         status: "active",
       });
@@ -522,8 +503,7 @@ const App: React.FC = () => {
               </h1>
               <div className="flex items-center gap-2 mt-2">
                 <p className="text-slate-500 text-sm font-medium">
-                  {userProfile ? `${userProfile.firstName} ${userProfile.lastName}` : (userEmail || "Guest")}
-                  {userProfile?.phoneNumber && <span className="ml-2 text-xs text-slate-400">({userProfile.phoneNumber})</span>}
+                  {userEmail || "Guest"}
                 </p>
                 <span className="w-1 h-1 rounded-full bg-slate-300" />
                 <button

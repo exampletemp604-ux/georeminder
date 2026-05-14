@@ -63,3 +63,14 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+export interface UserProfile {
+  uid: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  phoneNumber: string;
+  age: number;
+  interests: string[];
+  createdAt: number;
+}
+
