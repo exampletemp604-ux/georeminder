@@ -6,16 +6,22 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   sendPasswordResetEmail,
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  ConfirmationResult,
-  EmailAuthProvider,
-  linkWithCredential,
+  GoogleAuthProvider,
+  signInWithPopup,
   updatePassword
 } from "firebase/auth";
 import { db } from "../utils/firebase";
-import { doc, setDoc, getDocs, collection, query, where } from "firebase/firestore";
+import { doc, setDoc, getDoc } from "firebase/firestore";
 import { Check } from "lucide-react";
+
+const GoogleIcon = () => (
+  <svg viewBox="0 0 24 24" width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-1 .67-2.28 1.07-3.71 1.07-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+    <path d="M5.84 14.11c-.22-.67-.35-1.39-.35-2.11s.13-1.44.35-2.11V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.83z" fill="#FBBC05"/>
+    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
+  </svg>
+);
 
 interface LoginPageProps {
   onLoginSuccess: (email: string) => void;
@@ -29,8 +35,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   type AuthMode = "login" | "signup" | "forgot-password";
   const [mode, setMode] = useState<AuthMode>("login");
   const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [countryCode, setCountryCode] = useState("+91");
   const [password, setPassword] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -39,44 +43,35 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [resetSent, setResetSent] = useState(false);
-  const [loginMethod, setLoginMethod] = useState<"email" | "phone">("email");
-  const [signupMethod, setSignupMethod] = useState<"email" | "phone">("email");
-  const [otp, setOtp] = useState("");
-  const [showOtpField, setShowOtpField] = useState(false);
-  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
 
   const interestOptions = ["Food", "Travel", "Health", "Work", "Other"];
 
-  const setupRecaptcha = () => {
-    if (!(window as any).recaptchaVerifier) {
-      (window as any).recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-        'size': 'invisible',
-        'callback': (response: any) => {
-          // reCAPTCHA solved, allow signInWithPhoneNumber.
-        }
-      });
-    }
-  };
-
-  const handleSendOtp = async () => {
-    const cleanPhone = phone.replace(/\D/g, '');
-    if (cleanPhone.length !== 10) {
-      alert("Please enter a valid 10-digit phone number.");
-      return;
-    }
-    
+  const handleGoogleSignIn = async () => {
     setIsLoading(true);
     try {
-      setupRecaptcha();
-      const appVerifier = (window as any).recaptchaVerifier;
-      const formattedPhone = `${countryCode}${cleanPhone}`;
-      const result = await signInWithPhoneNumber(auth, formattedPhone, appVerifier);
-      setConfirmationResult(result);
-      setShowOtpField(true);
-      alert("OTP sent to " + formattedPhone);
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+
+      // Check if user exists in Firestore
+      const userDoc = await getDoc(doc(db, "users", user.uid));
+      if (!userDoc.exists()) {
+        // If new user, we might want to collect extra info later, 
+        // but for now just create a basic profile
+        const [fName, ...lNameParts] = (user.displayName || "User").split(" ");
+        await setDoc(doc(db, "users", user.uid), {
+          uid: user.uid,
+          email: user.email || "",
+          firstName: fName || "",
+          lastName: lNameParts.join(" ") || "",
+          createdAt: Date.now(),
+          interests: [],
+        });
+      }
+      onLoginSuccess(user.email || "User");
     } catch (error: any) {
-      console.error("SMS Error:", error);
-      alert("Failed to send SMS: " + error.message);
+      console.error("Google Auth error:", error);
+      alert("Google Sign-In failed: " + error.message);
     } finally {
       setIsLoading(false);
     }
@@ -88,83 +83,27 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     try {
       if (mode === "forgot-password") {
-        if (loginMethod === "email") {
-          if (!email.trim()) {
-            alert("Please enter your email.");
-            return;
-          }
-          await sendPasswordResetEmail(auth, email);
-          setResetSent(true);
-        } else {
-          // Phone Forgot Password
-          if (showOtpField && confirmationResult) {
-            const result = await confirmationResult.confirm(otp);
-            // Logged in via phone, now they can set a new password
-            if (password.length < 6) {
-              alert("Please enter a new password (min 6 characters).");
-              return;
-            }
-            await updatePassword(result.user, password);
-            alert("Password updated successfully! You can now login.");
-            setMode("login");
-          } else {
-            await handleSendOtp();
-          }
+        if (!email.trim()) {
+          alert("Please enter your email.");
+          return;
         }
+        await sendPasswordResetEmail(auth, email);
+        setResetSent(true);
         return;
       }
 
-      const isEmailMode = mode === "signup" ? signupMethod === "email" : loginMethod === "email";
-      
-      if (isEmailMode) {
-        if (!email.trim() || !password.trim()) {
-          alert("Please enter both email and password.");
-          return;
-        }
-      } else {
-        if (!phone.trim() || !password.trim()) {
-          alert("Please enter both phone number and password.");
-          return;
-        }
+      if (!email.trim() || !password.trim()) {
+        alert("Please enter both email and password.");
+        return;
       }
 
       if (mode === "signup") {
-        let user;
-        
-        if (signupMethod === "email") {
-          if (password.length < 6) {
-            alert("Password must be at least 6 characters for security.");
-            return;
-          }
-          const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-          user = userCredential.user;
-        } else {
-          // Phone Signup
-          if (!confirmationResult || !otp) {
-            if (!showOtpField) {
-              await handleSendOtp();
-              return;
-            }
-            alert("Please enter the OTP sent to your phone.");
-            return;
-          }
-          
-          // Verify OTP first
-          const phoneResult = await confirmationResult.confirm(otp);
-          
-          // Now link an email-based credential with a dummy email so they can login with password later
-          const dummyEmail = `phone_${phone.replace(/\+/g, '')}@georeminder.com`;
-          const emailCred = EmailAuthProvider.credential(dummyEmail, password);
-          
-          try {
-            await linkWithCredential(phoneResult.user, emailCred);
-            user = phoneResult.user;
-          } catch (linkError: any) {
-            // If the dummy email already exists (maybe from a previous partial attempt), we'll try to just use the user
-            console.warn("Linking failed, might already exist:", linkError);
-            user = phoneResult.user;
-          }
+        if (password.length < 6) {
+          alert("Password must be at least 6 characters for security.");
+          return;
         }
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        const user = userCredential.user;
 
         // Save extra details to Firestore
         await setDoc(doc(db, "users", user.uid), {
@@ -172,36 +111,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           email: user.email || "",
           firstName,
           lastName,
-          phoneNumber: phone,
-          age: parseInt(age),
+          age: parseInt(age) || 0,
           interests: selectedInterests,
           createdAt: Date.now()
         });
         
-        onLoginSuccess(user.email || user.phoneNumber || "User");
+        onLoginSuccess(user.email || "User");
       } else {
         // Login Logic
-        if (loginMethod === "email") {
-          await signInWithEmailAndPassword(auth, email, password);
-          onLoginSuccess(email);
-        } else {
-          // Phone Login with Password (No OTP needed for existing accounts)
-          const dummyEmail = `phone_${phone.replace(/\+/g, '')}@georeminder.com`;
-          try {
-            await signInWithEmailAndPassword(auth, dummyEmail, password);
-            onLoginSuccess(phone);
-          } catch (err: any) {
-            // If the user doesn't exist or password is wrong, we might want to fallback to OTP
-            // but the user said "no need to get otp", so we'll just show the error.
-            if (err.code === "auth/user-not-found") {
-              alert("No account found with this phone number. Please sign up first.");
-            } else if (err.code === "auth/wrong-password") {
-              alert("Incorrect password for this phone number.");
-            } else {
-              throw err; // Let the main catch block handle it
-            }
-          }
-        }
+        await signInWithEmailAndPassword(auth, email, password);
+        onLoginSuccess(email);
       }
     } catch (error: any) {
       console.error("Auth error:", error);
@@ -266,7 +185,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={{ duration: 0.4, ease: "easeOut" }}
-        className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden relative z-10 p-8 border border-white"
+        className="w-full max-w-md bg-white rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.1)] overflow-hidden relative z-10 p-8 border border-white"
       >
         <div className="text-center mb-8">
           <motion.div
@@ -320,123 +239,20 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           <form onSubmit={handleSubmit} className="space-y-4">
             <div id="recaptcha-container"></div>
             
-            <div className="flex bg-slate-100 p-1 rounded-xl mb-4">
-              <button
-                type="button"
-                onClick={() => mode === "signup" ? setSignupMethod("email") : setLoginMethod("email")}
-                className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${(mode === "signup" ? signupMethod === "email" : loginMethod === "email") ? "bg-white shadow-sm text-indigo-600" : "text-slate-500"}`}
-              >
-                Email
-              </button>
-              <button
-                type="button"
-                onClick={() => mode === "signup" ? setSignupMethod("phone") : setLoginMethod("phone")}
-                className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${(mode === "signup" ? signupMethod === "phone" : loginMethod === "phone") ? "bg-white shadow-sm text-indigo-600" : "text-slate-500"}`}
-              >
-                Phone
-              </button>
+            <div className="relative group">
+              <Mail
+                className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-600 transition-colors"
+                size={20}
+              />
+              <input
+                type="email"
+                required
+                placeholder="Email address"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full pl-12 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-600/5 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
+              />
             </div>
-
-            {(mode === "signup" ? signupMethod === "email" : loginMethod === "email") && (
-              <div className="relative group">
-                <Mail
-                  className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-600 transition-colors"
-                  size={20}
-                />
-                <input
-                  type="email"
-                  required
-                  placeholder="Email address"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
-                />
-              </div>
-            )}
-
-            {((mode === "signup" && signupMethod === "phone") || (mode !== "signup" && loginMethod === "phone")) && (
-              <div className="space-y-4">
-                <div className="relative group">
-                    <select
-                      value={countryCode}
-                      onChange={(e) => setCountryCode(e.target.value)}
-                      disabled={showOtpField}
-                      className="absolute left-2 top-1/2 -translate-y-1/2 bg-transparent text-slate-600 font-bold text-sm border-r border-slate-200 pr-1 pl-2 py-2 outline-none appearance-none z-10 cursor-pointer disabled:opacity-50 hover:text-indigo-600 transition-colors"
-                    >
-                      <option value="+91">+91 (IN)</option>
-                      <option value="+1">+1 (US/CA)</option>
-                      <option value="+44">+44 (UK)</option>
-                      <option value="+61">+61 (AU)</option>
-                      <option value="+81">+81 (JP)</option>
-                      <option value="+86">+86 (CN)</option>
-                    </select>
-                    <input
-                      type="tel"
-                      required
-                      disabled={showOtpField}
-                      maxLength={10}
-                      placeholder="10-digit Phone Number"
-                      value={phone}
-                      onChange={(e) => {
-                        const numericValue = e.target.value.replace(/\D/g, '');
-                        setPhone(numericValue);
-                      }}
-                      className="w-full pl-[95px] pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
-                    />
-                    {showOtpField && (
-                      <button
-                        type="button"
-                        onClick={() => { setShowOtpField(false); setConfirmationResult(null); }}
-                        className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-indigo-600"
-                      >
-                        Change
-                      </button>
-                    )}
-                  </div>
-                {showOtpField && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="relative group"
-                  >
-                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-600 transition-colors font-bold text-sm">
-                      OTP
-                    </div>
-                    <input
-                      type="text"
-                      required
-                      placeholder="6-digit OTP"
-                      value={otp}
-                      onChange={(e) => setOtp(e.target.value)}
-                      className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
-                    />
-                  </motion.div>
-                )}
-
-                {/* Password field for Phone Auth as requested */}
-                <div className="relative group">
-                  <Lock
-                    className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-600 transition-colors"
-                    size={20}
-                  />
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    required
-                    placeholder="Password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full pl-12 pr-12 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600 transition-colors focus:outline-none"
-                  >
-                    {showPassword ? <EyeOff size={20} /> : <Eye size={20} />}
-                  </button>
-                </div>
-              </div>
-            )}
 
             {mode === "signup" && (
               <>
@@ -448,7 +264,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                       placeholder="First Name"
                       value={firstName}
                       onChange={(e) => setFirstName(e.target.value)}
-                      className="w-full px-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-600/5 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
                     />
                   </div>
                   <div className="relative group">
@@ -458,7 +274,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                       placeholder="Last Name"
                       value={lastName}
                       onChange={(e) => setLastName(e.target.value)}
-                      className="w-full px-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-600/5 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
                     />
                   </div>
                 </div>
@@ -469,7 +285,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     placeholder="Age"
                     value={age}
                     onChange={(e) => setAge(e.target.value)}
-                    className="w-full px-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-600/5 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
                   />
                 </div>
                 
@@ -500,7 +316,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               </>
             )}
 
-            {(mode !== "forgot-password" && (mode === "signup" ? signupMethod === "email" : loginMethod === "email")) && (
+            {mode !== "forgot-password" && (
               <div className="relative group">
                 <Lock
                   className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-600 transition-colors"
@@ -512,7 +328,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   placeholder="Password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-12 pr-12 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-2 focus:ring-indigo-600/20 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
+                  className="w-full pl-12 pr-12 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:bg-white focus:ring-4 focus:ring-indigo-600/5 focus:border-indigo-600 outline-none transition-all placeholder:text-slate-400 font-medium text-slate-900"
                 />
                 <button
                   type="button"
@@ -545,8 +361,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
             <button
               type="submit"
-              disabled={isLoading || (mode === "forgot-password" ? !email : (mode === "signup" ? (signupMethod === "email" ? (!email || !password) : !phone) : (loginMethod === "email" ? (!email || !password) : !phone)))}
-              className="w-full py-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-2xl font-bold shadow-xl shadow-indigo-600/20 hover:shadow-indigo-600/40 transition-all hover:-translate-y-1 disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-indigo-600/20 flex items-center justify-center gap-2"
+              disabled={isLoading || (mode === "forgot-password" ? !email : (!email || !password))}
+              className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold shadow-xl shadow-slate-200 hover:shadow-slate-300 transition-all hover:-translate-y-1 active:scale-[0.98] disabled:bg-slate-400 disabled:shadow-none disabled:hover:translate-y-0 flex items-center justify-center gap-2 mt-2"
             >
               {isLoading ? (
                 <motion.span
@@ -556,11 +372,28 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 />
               ) : mode === "forgot-password" ? (
                 "Send Reset Link"
-              ) : ((signupMethod === "phone" || loginMethod === "phone") && !showOtpField && mode !== "forgot-password") ? (
-                "Send OTP"
               ) : (
                 "Continue to Dashboard"
               )}
+            </button>
+
+            <div className="relative py-2">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-100"></div>
+              </div>
+              <div className="relative flex justify-center text-[10px] uppercase">
+                <span className="bg-white px-4 text-slate-400 font-black tracking-widest">Or continue with</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleGoogleSignIn}
+              disabled={isLoading}
+              className="w-full py-4 bg-white border-2 border-slate-100 text-slate-700 rounded-2xl font-bold hover:bg-slate-50 hover:border-slate-200 transition-all flex items-center justify-center gap-3 active:scale-[0.98] shadow-sm hover:shadow-md"
+            >
+              <GoogleIcon />
+              Continue with Google
             </button>
           </form>
         )}

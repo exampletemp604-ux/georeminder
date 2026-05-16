@@ -9,7 +9,6 @@ import {
   updateDoc,
   query,
   where,
-  getDoc,
 } from "firebase/firestore";
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -23,7 +22,7 @@ import {
   Navigation,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Reminder, UserLocation, GeoStatus, UserProfile } from "./types";
+import { Reminder, UserLocation, GeoStatus } from "./types";
 import { calculateDistance, formatDistance } from "./utils/geoUtils";
 import { AddReminderModal } from "./components/AddReminderModal";
 import { TriggeredReminderModal } from "./components/TriggeredReminderModal";
@@ -39,8 +38,6 @@ const App: React.FC = () => {
 
   const [currentScreen, setCurrentScreen] = useState<"landing" | "login" | "dashboard">("landing");
   const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [userUid, setUserUid] = useState<string | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [dark, setDark] = useState(false);
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
@@ -49,6 +46,12 @@ const App: React.FC = () => {
     useState<Reminder | null>(null);
   const [aiTriggeredMessage, setAiTriggeredMessage] = useState<string | null>(null);
   const [navigatingId, setNavigatingId] = useState<string | null>(null);
+
+  /* ================= PROFESSION POI STATE ================= */
+  const [profession, setProfession] = useState<string>("");
+  const [professionPOIs, setProfessionPOIs] = useState<any[]>([]);
+  const [poiLoading, setPoiLoading] = useState(false);
+  const lastPoiFetch = useRef<number>(0);
 
   /* ================= APP STATE ================= */
 
@@ -76,29 +79,15 @@ const App: React.FC = () => {
 
   /* ================= AUTH PERSISTENCE ================= */
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsub = onAuthStateChanged(auth, (user) => {
       if (user) {
-        setUserEmail(user.email || user.phoneNumber || "Authenticated User");
-        setUserUid(user.uid);
-        
-        // Fetch profile
-        try {
-          const userDoc = await getDoc(doc(db, "users", user.uid));
-          if (userDoc.exists()) {
-            setUserProfile(userDoc.data() as UserProfile);
-          }
-        } catch (err) {
-          console.error("Error fetching profile:", err);
-        }
-
+        setUserEmail(user.email || "Authenticated User");
         setCurrentScreen("dashboard");
         if ("Notification" in window && Notification.permission === "default") {
           Notification.requestPermission();
         }
       } else {
         setUserEmail(null);
-        setUserUid(null);
-        setUserProfile(null);
         if (currentScreen === "dashboard") {
           setCurrentScreen("landing");
         }
@@ -113,7 +102,6 @@ const App: React.FC = () => {
     try {
       await signOut(auth);
       setUserEmail(null);
-      setUserUid(null);
       setReminders([]);
       setCurrentScreen("landing");
     } catch (err) {
@@ -124,10 +112,10 @@ const App: React.FC = () => {
   /* ================= LOAD REMINDERS ================= */
 
   useEffect(() => {
-    if (currentScreen !== "dashboard" || !userUid) return;
+    if (currentScreen !== "dashboard" || !userEmail) return;
 
-    // Isolate data by the user's UID (more secure than email, works for phone accounts)
-    const q = query(collection(db, "reminders"), where("userId", "==", userUid));
+    // Isolate data by the mock user's email
+    const q = query(collection(db, "reminders"), where("userEmail", "==", userEmail));
 
     const unsub = onSnapshot(
       q,
@@ -417,17 +405,74 @@ const App: React.FC = () => {
     lastRouteFetch.current = 0; // Reset so it fetches immediately when started again
   }, []);
 
-  /* ================= ADD ================= */
+  /* ================= PROFESSION POI FETCH ================= */
+
+  const PROFESSION_CATEGORIES: Record<string, { label: string; emoji: string; query: string; color: string }> = {
+    food_blogger: { label: "Food Blogger", emoji: "🍽️", query: "restaurant", color: "from-orange-400 to-red-500" },
+    traveller:    { label: "Traveller",    emoji: "🏨", query: "hotel",      color: "from-blue-400 to-cyan-500" },
+    pharmacist:   { label: "Pharmacist",   emoji: "💊", query: "pharmacy",   color: "from-green-400 to-emerald-500" },
+    shopper:      { label: "Shopper",      emoji: "🛍️", query: "shopping mall", color: "from-pink-400 to-purple-500" },
+    fitness:      { label: "Fitness",      emoji: "🏋️", query: "gym",        color: "from-yellow-400 to-orange-500" },
+    coffee_lover: { label: "Coffee Lover", emoji: "☕", query: "cafe",       color: "from-amber-500 to-yellow-600" },
+    photographer: { label: "Photographer", emoji: "📸", query: "park",       color: "from-teal-400 to-green-500" },
+    banking:      { label: "Banking",      emoji: "🏧", query: "ATM",        color: "from-slate-400 to-gray-600" },
+  };
+
+  const fetchProfessionPOIs = useCallback(async (prof: string, lat: number, lng: number) => {
+    if (!prof || !lat || !lng) return;
+    const now = Date.now();
+    if (now - lastPoiFetch.current < 120000) return; // throttle 2 mins
+    lastPoiFetch.current = now;
+
+    const tomtomKey = import.meta.env.VITE_TOMTOM_API_KEY;
+    if (!tomtomKey) return;
+
+    const category = PROFESSION_CATEGORIES[prof];
+    if (!category) return;
+
+    setPoiLoading(true);
+    try {
+      const res = await fetch(
+        `https://api.tomtom.com/search/2/search/${encodeURIComponent(category.query)}.json?key=${tomtomKey}&limit=5&lat=${lat}&lon=${lng}&radius=5000&countrySet=IN`
+      );
+      const data = await res.json();
+      if (data.results) {
+        setProfessionPOIs(data.results.map((r: any) => ({
+          id: r.id,
+          name: r.poi?.name || r.address?.freeformAddress || "Unknown",
+          address: r.address?.freeformAddress || "",
+          lat: r.position?.lat,
+          lng: r.position?.lon,
+          dist: r.dist ? Math.round(r.dist) : null,
+          category: category.label,
+          emoji: category.emoji,
+        })));
+      }
+    } catch (e) {
+      console.error("POI fetch failed", e);
+    } finally {
+      setPoiLoading(false);
+    }
+  }, []);
+
+  // Auto-fetch POIs when tracking is active and profession is set
+  useEffect(() => {
+    if (trackingStatus.active && profession && userLoc) {
+      fetchProfessionPOIs(profession, userLoc.lat, userLoc.lng);
+    }
+    if (!profession) {
+      setProfessionPOIs([]);
+    }
+  }, [profession, userLoc?.lat, userLoc?.lng, trackingStatus.active]);
 
   const handleAddReminder = async (
     data: Omit<Reminder, "id" | "createdAt" | "status">,
   ) => {
-    if (!userUid) return;
+    if (!userEmail) return null;
     try {
       const docRef = await addDoc(collection(db, "reminders"), {
         ...data,
-        userId: userUid, // Identify which user this belongs to via secure UID
-        userEmail: userEmail || "", // Kept for backwards compatibility if needed
+        userEmail: userEmail, // Identify which user this belongs to
         createdAt: Date.now(),
         status: "active",
       });
@@ -437,9 +482,36 @@ const App: React.FC = () => {
           updateDoc(doc(db, "reminders", docRef.id), { category, emoji, categoryColor })
         )
         .catch(() => { });
+        
+      return docRef.id;
     } catch (err: any) {
       console.error("Failed to add reminder:", err);
       alert("Error: " + err.message);
+      return null;
+    }
+  };
+
+  const handleSelectPOI = async (poi: any) => {
+    const id = await handleAddReminder({
+      title: poi.name,
+      notes: `Discovered near you via "${poi.category}" profile.`,
+      lat: poi.lat,
+      lng: poi.lng,
+      radiusMeters: 500,
+    });
+
+    if (id) {
+      setNavigatingId(id);
+      setViewMode("map");
+      // Give a bit of visual feedback
+      const category = PROFESSION_CATEGORIES[profession];
+      if (category) {
+        updateDoc(doc(db, "reminders", id), {
+          category: category.label,
+          emoji: category.emoji,
+          categoryColor: category.color
+        }).catch(() => {});
+      }
     }
   };
 
@@ -522,8 +594,7 @@ const App: React.FC = () => {
               </h1>
               <div className="flex items-center gap-2 mt-2">
                 <p className="text-slate-500 text-sm font-medium">
-                  {userProfile ? `${userProfile.firstName} ${userProfile.lastName}` : (userEmail || "Guest")}
-                  {userProfile?.phoneNumber && <span className="ml-2 text-xs text-slate-400">({userProfile.phoneNumber})</span>}
+                  {userEmail || "Guest"}
                 </p>
                 <span className="w-1 h-1 rounded-full bg-slate-300" />
                 <button
@@ -663,6 +734,116 @@ const App: React.FC = () => {
                 Mock Arrival
               </button>
             </div>
+          </motion.div>
+
+          {/* Profession / Interest Profile Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`p-5 rounded-3xl backdrop-blur-xl border shadow-xl mb-6 ${dark ? "bg-white/10 border-white/20" : "bg-white/70 border-white/40"}`}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-lg">🎯</span>
+              <h2 className={`font-bold text-sm ${dark ? "text-white" : "text-slate-700"}`}>
+                My Profession / Interest
+              </h2>
+              {profession && (
+                <span className={`ml-auto text-xs px-2 py-0.5 rounded-full font-semibold bg-gradient-to-r ${PROFESSION_CATEGORIES[profession]?.color} text-white`}>
+                  {PROFESSION_CATEGORIES[profession]?.emoji} {PROFESSION_CATEGORIES[profession]?.label}
+                </span>
+              )}
+            </div>
+
+            {/* Profession Pills */}
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(PROFESSION_CATEGORIES).map(([key, val]) => (
+                <button
+                  key={key}
+                  onClick={() => setProfession(profession === key ? "" : key)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all duration-200 ${
+                    profession === key
+                      ? `bg-gradient-to-r ${val.color} text-white border-transparent shadow-md scale-105`
+                      : dark
+                        ? "bg-white/10 border-white/20 text-white/80 hover:bg-white/20"
+                        : "bg-slate-100 border-slate-200 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  {val.emoji} {val.label}
+                </button>
+              ))}
+            </div>
+
+            {/* POI Results */}
+            <AnimatePresence>
+              {profession && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className="mt-4 border-t pt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className={`text-xs font-semibold ${dark ? "text-white/60" : "text-slate-500"}`}>
+                        {trackingStatus.active
+                          ? `Nearby ${PROFESSION_CATEGORIES[profession]?.label} spots`
+                          : `Start tracking to discover nearby ${PROFESSION_CATEGORIES[profession]?.label} spots`}
+                      </p>
+                      {trackingStatus.active && userLoc && (
+                        <button
+                          onClick={() => { lastPoiFetch.current = 0; fetchProfessionPOIs(profession, userLoc.lat, userLoc.lng); }}
+                          className="text-xs text-indigo-500 font-bold hover:text-indigo-700"
+                        >
+                          ↻ Refresh
+                        </button>
+                      )}
+                    </div>
+
+                    {poiLoading && (
+                      <div className="flex items-center gap-2 py-2">
+                        <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                        <span className="text-xs text-slate-400">Finding spots near you…</span>
+                      </div>
+                    )}
+
+                    {!poiLoading && professionPOIs.length > 0 && (
+                      <div className="space-y-2">
+                        {professionPOIs.map((poi) => (
+                          <motion.div
+                            key={poi.id}
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            onClick={() => handleSelectPOI(poi)}
+                            className={`flex items-center gap-3 p-3 rounded-2xl border transition-all cursor-pointer hover:scale-[1.02] hover:shadow-md active:scale-95 ${
+                              dark ? "bg-white/10 border-white/10 hover:bg-white/20" : "bg-slate-50 border-slate-200 hover:bg-white hover:border-indigo-300"
+                            }`}
+                          >
+                            <span className="text-2xl shrink-0">{poi.emoji}</span>
+                            <div className="flex-1 min-w-0">
+                              <p className={`font-semibold text-sm truncate ${dark ? "text-white" : "text-slate-800"}`}>
+                                {poi.name}
+                              </p>
+                              <p className={`text-xs truncate ${dark ? "text-white/50" : "text-slate-400"}`}>
+                                {poi.address}
+                              </p>
+                            </div>
+                            {poi.dist && (
+                              <span className={`shrink-0 text-xs font-bold px-2 py-1 rounded-lg ${dark ? "bg-white/20 text-white" : "bg-indigo-100 text-indigo-600"}`}>
+                                {poi.dist < 1000 ? `${poi.dist}m` : `${(poi.dist / 1000).toFixed(1)}km`}
+                              </span>
+                            )}
+                          </motion.div>
+                        ))}
+                      </div>
+                    )}
+
+                    {!poiLoading && professionPOIs.length === 0 && trackingStatus.active && (
+                      <p className="text-xs text-slate-400 italic py-1">No spots found nearby. Try refreshing or moving closer.</p>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </motion.div>
 
           {/* View Toggle & Filter Tabs */}
