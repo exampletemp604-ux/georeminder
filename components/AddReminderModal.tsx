@@ -52,7 +52,11 @@ export const AddReminderModal: React.FC<AddReminderModalProps> = ({ isOpen, onCl
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() && !searchCategory.trim()) return;
+    // Ensure we have at least a title, category, or coordinate update
+    if (!title.trim() && !searchCategory.trim() && lat === userLat && lng === userLng) {
+      alert("Please enter a title, category, or select a location on the map.");
+      return;
+    }
     
     // Default title if empty
     const finalTitle = title.trim() || searchCategory.trim() || 'Reminder';
